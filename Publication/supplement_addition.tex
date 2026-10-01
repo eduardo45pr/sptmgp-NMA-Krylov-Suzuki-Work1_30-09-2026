@@ -1,0 +1,64 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,graphicx,tabularx}
+\setlength{\parindent}{1em}
+\setlength{\parskip}{0pt}
+\begin{document}
+\section*{VI. Quantum-resource viewer diagnostics}
+
+The extended viewer is designed to expose only quantities that are available from validated numerical outputs. Table~\ref{tab:viewer} distinguishes implemented or directly derivable quantities from quantities that require additional quantum-state calculations.
+
+\begin{table}[h]
+\centering
+\caption{Interpretation rules for the extended viewer.}
+\label{tab:viewer}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.20\textwidth}XX@{}}
+\toprule
+Viewer element & Source quantity & Allowed interpretation \\
+\midrule
+Compact qubit count & $n_q=\lceil\log_2 D\rceil$ & Index-register size for the displayed operator or block \\
+Binary basis label & Integer basis index $b$ & Compact basis-state label; not an atom-to-qubit assignment \\
+Pauli-term graph & Retained $c_jP_j$ terms & Operator coupling / shared Pauli support \\
+Trotter fidelity & Same-H exact and product-formula outputs & Product-formula accuracy for the same retained Hamiltonian \\
+Runtime panel & Stage-resolved timing CSV & Classical measured wall time for named pipeline stages \\
+Protein motion & Stored Cartesian eigenvectors & Structural displacement pattern for the selected normal mode \\
+Entanglement & Not present in current outputs & Must remain disabled or explicitly labeled illustrative until state-derived metrics are computed \\
+Quantum speedup & Not established & Must not be displayed as a validated result \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection*{Basis-index mapping}
+For an operator or modal block of dimension $D=2^{n_q}$, the viewer displays each basis-state index as an $n_q$-bit string. For $D=64$, indices $0$ through $63$ correspond to $|000000\rangle$ through $|111111\rangle$. If the physical block has fewer than $D$ states, padded labels are identified separately and are not presented as physical modes.
+
+\subsection*{Qubit-coupling matrix}
+Let $s_j(a)=1$ when Pauli string $P_j$ acts nontrivially on qubit $a$ and zero otherwise. A simple coupling score used only for visualization is
+\begin{equation}
+ C_{ab}=\sum_{j=1}^{K}|c_j|s_j(a)s_j(b),\qquad a\neq b.
+\end{equation}
+A normalized variant $\widetilde C_{ab}=C_{ab}/\max_{a<b}C_{ab}$ can control graph edge width. This quantity measures shared support in the retained Hamiltonian. It is not concurrence, mutual information, entropy, or any other entanglement measure.
+
+\subsection*{What would be required for an entanglement panel}
+A genuine entanglement panel requires a propagated state $|\psi(t)\rangle$ or density operator $\rho(t)$. For a subsystem $A$, one may compute
+\begin{equation}
+ \rho_A(t)=\mathrm{Tr}_{\bar A}\rho(t),\qquad
+ S_A(t)=-\mathrm{Tr}\left[\rho_A(t)\log_2\rho_A(t)\right].
+\end{equation}
+Pairwise mutual information could similarly be displayed as
+\begin{equation}
+ I(a:b)=S(\rho_a)+S(\rho_b)-S(\rho_{ab}).
+\end{equation}
+These quantities are not inferred from Hamiltonian connectivity. They should be added only after the software stores the propagated state and validates the reduced-density-matrix calculation.
+
+\section*{VII. Protein viewer mapping example and limitations}
+The 1CRN stress test in the present Supplementary Material contains 642 atoms and 1926 Cartesian degrees of freedom. Its primary reduced Krylov space has dimension 64, corresponding to six reduced index qubits, while the full-space index-register count is 11. The reported reduced-space ST4 spectrum closely tracks the same reduced operator, but the Dense-NMA versus primary Lanczos spectral cosine is 0.8643. Therefore the example is useful for testing visualization, memory accounting, and mode-to-register mapping, but it does not validate six qubits as a replacement for the complete protein vibrational problem.
+
+A viewer test for this dataset should display at least: (i) structure atom count; (ii) eigenvector atom count and a MATCH/MISMATCH flag; (iii) selected mode and frequency; (iv) reduced-space dimension; (v) compact qubit count; (vi) binary basis label; (vii) retained Pauli-term statistics if available; (viii) same-H Trotter fidelity; and (ix) stage-resolved classical timings. Structural arrows should be calculated from the stored Cartesian displacement vector and normalized only for display.
+
+\section*{VIII. Recommended software export fields}
+To make the viewer reproducible, the numerical backend should export a small JSON record for each dataset with fields such as \texttt{physical\_dimension}, \texttt{padded\_dimension}, \texttt{n\_qubits}, \texttt{mode\_index}, \texttt{frequency\_cm1}, \texttt{pauli\_term\_count}, \texttt{retained\_term\_count}, \texttt{retained\_fraction}, \texttt{trace\_fidelity}, \texttt{unitary\_error}, and stage-resolved timings. Protein datasets should additionally record \texttt{structure\_atom\_count}, \texttt{eigenvector\_atom\_count}, and the mode/block association used by the viewer.
+
+The visualization code should treat these files as read-only scientific inputs. A screenshot or animation is then reproducible from the same machine-readable record that supports the manuscript tables.
+
+\end{document}

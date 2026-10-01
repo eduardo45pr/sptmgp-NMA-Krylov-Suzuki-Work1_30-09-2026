@@ -1,0 +1,583 @@
+% JCP / AIP manuscript draft generated from the current benchmark code and uploaded results.
+% IMPORTANT BEFORE SUBMISSION:
+% (1) Replace the MMFF94s/Gasteiger IR proxy with a QM/DFT Hessian and physical dipole derivatives
+%     for at least a representative subset, or explicitly retain the paper as an algorithmic benchmark.
+% (2) Regenerate the full 10-molecule pauli_compression.csv and runtime tables with the SAME final code/version.
+% (3) Fill author affiliations, contributions, funding, conflicts, data/code DOI, and hardware details.
+% (4) Do not claim quantum advantage or end-to-end NMA speedup from the current classical emulation.
+
+\documentclass[aip,jcp,reprint,amsmath,amssymb,floatfix]{revtex4-2}
+
+\usepackage{graphicx}
+\usepackage{dcolumn}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{microtype}
+
+\newcommand{\Hmw}{\mathbf{H}_{\mathrm{mw}}}
+\newcommand{\Hcart}{\mathbf{H}_{\mathrm{cart}}}
+\newcommand{\Hp}{\widetilde{\mathbf{H}}}
+\newcommand{\Hf}{\widetilde{\mathbf{H}}_{f}}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\ii}{\mathrm{i}}
+
+\begin{document}
+
+\title{A Reproducible Software Workflow for Compact Pauli Analysis of Molecular Vibrational Hamiltonians}
+
+\author{Author One}
+\email{corresponding.author@example.com}
+\affiliation{Affiliation to be inserted before submission}
+\author{Author Two}
+\affiliation{Affiliation to be inserted before submission}
+
+\date{\today}
+
+\begin{abstract}
+We describe a reproducible software workflow for converting molecular harmonic vibrational Hamiltonians into compact Pauli representations and for diagnosing where numerical error enters the calculation. The implementation combines molecular preparation, finite-difference Hessian construction, mass weighting, Dense and Lanczos normal-mode analysis, power-of-two operator embedding, exact Pauli decomposition, coefficient-ranked sparsification, same-Hamiltonian Suzuki--Trotter validation, resource telemetry, and interactive mode visualization in a single Python pipeline. The software was developed around three practical failure modes encountered during benchmarking: a fixed Pauli-term cutoff is not comparable across molecules, aggressive sparsification can be mistaken for Trotter error, and propagation-kernel timing alone can hide substantial preprocessing cost. Accordingly, the workflow validates the 100\% Pauli mapping before compression, uses fraction-based retention across systems, and compares Suzuki--Trotter propagation only with the exact exponential of the same retained operator. A ten-molecule benchmark spans 17--67 atoms, 51--201 Cartesian degrees of freedom, and compact index registers of 6--8 qubits. Independent full-reconstruction tests give relative Frobenius errors of $3.1\times10^{-16}$--$8.3\times10^{-16}$. The current reference backend uses MMFF94s Hessians and a fixed-charge IR proxy for rapid software validation; therefore the present results establish numerical behavior rather than final ab initio spectroscopy. We report the software architecture, implementation choices, runtime and memory accounting, output formats, failure-mode guardrails, and a roadmap for direct interfaces to electronic-structure Hessians and dipole derivatives.\end{abstract}
+
+\maketitle
+
+\section{Introduction}
+Electronic-structure methods become useful to the wider community only after the underlying theory has been translated into software that is numerically stable, reproducible, and practical to run. The first JCP Special Topic on Electronic Structure Software emphasized not only available capabilities, but also speed, scaling, numerical implementation, software design, and the strengths and limitations of individual programs.\cite{Sherrill2020Software} JCP subsequently established a Chemical Physics Software section that explicitly welcomes implementations of new algorithms, resource-reducing strategies, reusable components, automation, and analysis tools, while discouraging papers that merely list software features.\cite{Sherrill2021Software}
+
+The software developed here grew out of a narrower problem in molecular vibrational analysis. We wanted a transparent way to take a real symmetric vibrational operator, map it into a compact Pauli representation, remove operator terms in a controlled way, and then determine whether a Suzuki--Trotter propagation was failing because of the product formula or because the Hamiltonian had already been damaged by compression. That distinction sounds straightforward, but our early tests exposed several practical traps. A fixed cutoff of 192 Pauli terms, for example, represented about 9.2\% of the aspirin operator but only about 0.6\% of the curcumin operator. The same nominal setting therefore imposed very different approximations. Likewise, plotting a Trotter spectrum against the original Dense-NMA spectrum made an over-compressed Hamiltonian look like a Trotter failure even when the exact and Trotter propagations of that compressed Hamiltonian agreed closely.
+
+Those observations determined the software design. The current workflow first validates Dense NMA against a full-reorthogonalized Lanczos calculation, then validates the complete Pauli reconstruction, then performs fraction-based sparsification, and only after that evaluates exact and Suzuki--Trotter propagation of the same retained operator. Stage-resolved wall time and resident-set-size (RSS) measurements are written alongside the scientific outputs so that preprocessing, operator construction, and propagation are not silently mixed. The program also exports machine-readable CSV/JSON data, publication figures, molecular structures, and an optional browser-based normal-mode viewer.
+
+The present implementation should be viewed as a focused vibrational-analysis and operator-transformation tool rather than as a general electronic-structure engine. Its current internal benchmark backend uses RDKit/MMFF94s to generate geometries and harmonic Hessians rapidly. The core numerical layer, however, consumes a real symmetric vibrational Hamiltonian and is independent of the force field itself. For a final submission to the \emph{Electronic Structure Software 2.0} Special Topic, the most important remaining development step is therefore a tested interface to at least one electronic-structure source of Hessians and physical dipole derivatives. We keep that boundary explicit throughout the manuscript rather than presenting the MMFF benchmark as electronic-structure spectroscopy.
+
+The contributions of this work are consequently software-centered: (i) a modular validation pipeline that keeps eigensolver, encoding, sparsification, and product-formula errors separate; (ii) numerical guardrails that prevent unfair cross-molecule compression and unsupported speedup claims; (iii) explicit runtime and memory accounting for Dense, Pauli, and classical propagation representations; and (iv) a reproducible set of structured outputs intended to make the software easy to inspect, extend, and benchmark.
+
+
+% -----------------------------------------------------------------------------
+% NEW SCIENTIFIC/TECHNOLOGICAL HIGHLIGHTS -- shown in red for author review
+% -----------------------------------------------------------------------------
+\begingroup
+\color{red}
+\subsection*{Six scientific and technological highlights}
+
+From the perspective of quantum computational physics and molecular simulation, six aspects of the present workflow are particularly relevant for future scientific and technological development, including potential applications in quantum-computing ecosystems such as Google Quantum AI, IBM Quantum, and related hardware--software platforms:
+
+\begin{enumerate}
+    \item \textbf{Logarithmically compact index-register representation.}
+    A vibrational problem of Cartesian dimension $d$ is embedded in only
+    $n_q=\lceil\log_2 d\rceil$ qubits. Across the present ten-molecule benchmark,
+    systems containing 51--201 Cartesian degrees of freedom require only 6--8
+    index qubits. This constitutes a substantial reduction in register size
+    relative to a hypothetical one-qubit-per-degree-of-freedom encoding and is
+    directly relevant to the design of compact quantum algorithms. Importantly,
+    this register compression is a representation advantage and is not, by
+    itself, a claim of reduced classical memory or end-to-end quantum speedup.
+
+    \item \textbf{Machine-precision mapping of molecular vibrational operators into Pauli form.}
+    The workflow transforms the embedded real symmetric vibrational Hamiltonian
+    into the quantum-compatible form $\widetilde{H}=\sum_j c_jP_j$, with
+    $P_j\in\{I,X,Y,Z\}^{\otimes n_q}$. Independent full-reconstruction tests
+    yield relative Frobenius errors in the $10^{-16}$ range, demonstrating that
+    the compact power-of-two embedding and exact Pauli decomposition can preserve
+    the encoded operator to machine precision before sparsification. This creates
+    a numerically controlled bridge between conventional molecular simulation and
+    gate-based quantum representations.
+
+    \item \textbf{A physically important failure of coefficient-only Hamiltonian compression.}
+    One of the most significant observations is that retaining almost all of the
+    squared Pauli-coefficient weight does not guarantee preservation of molecular
+    observables. For Patulin, retaining 10\% of the Pauli terms preserves
+    $W_2=0.9951$, yet produces a frequency MAE of approximately
+    $159.2\ \mathrm{cm}^{-1}$ and reduces the spectral cosine similarity to
+    0.514. Thus, an algebraically small perturbation can rotate eigenvectors and
+    redistribute vibrational intensities. This result motivates
+    \emph{observable-aware Hamiltonian compression}, in which terms are selected
+    according to the physical information that must be preserved rather than
+    solely according to $|c_j|$.
+
+    \item \textbf{Explicit separation of Hamiltonian-compression error from Suzuki--Trotter error.}
+    The validation protocol compares Suzuki--Trotter propagation with the exact
+    exponential of the \emph{same retained Hamiltonian}. This prevents spectral
+    distortion introduced during sparsification from being incorrectly attributed
+    to the product formula. In the aggressive Patulin stress test, the exact and
+    Trotter propagations of the compressed operator agree essentially to numerical
+    precision even though the compressed spectrum differs strongly from the
+    original Dense-NMA result. Such stage-resolved error attribution is important
+    for trustworthy benchmarking of quantum simulation algorithms.
+
+    \item \textbf{A molecule-specific accuracy--resource frontier instead of a universal truncation rule.}
+    The workflow defines the minimum acceptable retained fraction through combined
+    constraints on spectral similarity, vibrational-frequency error, and operator
+    error. Consequently, a fixed ``1\%'' or ``10\%'' Pauli-retention rule is not
+    assumed to be transferable across chemically different systems. This concept
+    can be developed into an automated compilation or optimization layer that
+    determines the smallest quantum-compatible Hamiltonian satisfying a specified
+    physical-accuracy target before circuit construction.
+
+    \item \textbf{A reproducible classical--quantum software pipeline with direct relevance to future quantum-chemistry workflows.}
+    Molecular preparation, Hessian construction, Dense/Lanczos validation,
+    power-of-two embedding, Pauli decomposition, controlled sparsification,
+    Suzuki--Trotter propagation, runtime/memory telemetry, structured data export,
+    and interactive mode visualization are integrated while retaining explicit
+    validation boundaries. The numerical core is independent of MMFF94s and can
+    therefore serve as a post-processing layer for converged electronic-structure
+    Hessians and physical dipole derivatives. Coupling this architecture to DFT
+    or higher-level electronic-structure calculations would make it particularly
+    relevant to hardware--software co-design studies in quantum chemistry and to
+    quantum-computing platforms interested in reducing circuit resources while
+    preserving physically meaningful observables.
+\end{enumerate}
+
+\textbf{Broader implication.} The most promising conceptual direction suggested by
+these results is the transition from coefficient-ranked Pauli truncation toward
+\emph{physics-aware or observable-aware quantum Hamiltonian compression}: rather
+than asking only which Pauli coefficients are largest, the algorithm would ask
+which subset of Pauli operators is minimally sufficient to preserve the target
+frequencies, eigenvectors, spectra, or dynamical observables. This problem lies at
+the intersection of computational molecular physics, quantum algorithm design,
+resource-aware compilation, and potentially machine-learning-assisted operator
+selection.
+\endgroup
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/software_architecture.pdf}
+\caption{Software architecture and validation flow. The current reference backend performs molecular preparation and MMFF94s Hessian construction, after which the numerical core validates Dense/Lanczos eigensolutions, constructs the compact Pauli representation, performs controlled sparsification, and evaluates exact and Suzuki--Trotter propagation of the same retained operator. Telemetry and visualization are kept as separate output layers. A production Electronic Structure Software 2.0 version should connect the same numerical core to one or more tested electronic-structure Hessian and dipole-derivative interfaces.}
+\label{fig:architecture}
+\end{figure*}
+
+\section{Software Scope and Architecture}
+
+\subsection{Implemented workflow}
+The reference implementation is organized as a sequence of independently testable stages rather than a single monolithic calculation (Fig.~\ref{fig:architecture}). The input/preparation layer creates a hydrogen-complete molecular structure, performs a deterministic 3D embedding, optimizes the geometry, and evaluates gradients needed for the finite-difference Hessian. The vibrational layer constructs the mass-weighted Hessian and computes Dense, full-Lanczos, and low-mode iterative references. The operator layer normalizes and pads the physical matrix, performs the exact Pauli decomposition, and verifies that the 100\% reconstruction returns the input operator. The accuracy-control layer carries out coefficient-ranked sparsification and same-Hamiltonian exact/Trotter propagation. Finally, the reporting layer writes all numerical metrics, plots, structures, and viewer files.
+
+This staging is deliberate. A failed result can be localized to a specific boundary: the classical eigensolution, the compact mapping, the retained Pauli operator, or the product formula. In practice, that separation was more useful during development than a single aggregate accuracy score.
+
+\subsection{Command-line interface and machine-readable outputs}
+The code is operated from a Python command line. User-selectable settings include the molecular benchmark subset, finite-difference displacement, Pauli-retention fractions, Trotter-retention fractions, product-formula step counts, random seed, and viewer options. Each molecule receives its own output directory containing the optimized structure, Cartesian and mass-weighted operators, mode tables, compression metrics, Trotter metrics, stage-resolved runtime/RSS telemetry, summary metadata, and publication figures. The principal files are \texttt{summary.json}, \texttt{full\_pauli\_validation.json}, \texttt{full\_modes\_dense\_lanczos.csv}, \texttt{pauli\_compression.csv}, \texttt{trotter\_convergence.csv}, \texttt{spectrum\_curves.csv}, and \texttt{runtime\_memory\_stages.csv}. Keeping these intermediate products visible makes it possible to audit a figure against the underlying numerical table rather than relying on a single rendered plot.
+
+\subsection{Design decisions motivated by failure modes}
+Three implementation decisions are central to the current version. First, Pauli compression is specified by a retained fraction rather than a fixed number of terms. This makes the requested approximation comparable when the padded operator dimension changes. Second, the exact 100\% Pauli reconstruction is mandatory before a compression sweep. A compressed-spectrum error is therefore not allowed to hide a mapping error. Third, Suzuki--Trotter error is evaluated only against the exact exponential of the same compressed Hamiltonian. The program separately reports error relative to Dense NMA so that compression and propagation errors remain distinguishable.
+
+The code also avoids using a dense eigenspectrum to normalize the operator before the compact transformation. Instead, a Gershgorin bound and infinity norm provide a deterministic shift-and-scale procedure. This choice prevents the supposedly compact stage from depending on information available only after a complete dense diagonalization.
+
+\subsection{Reproducibility and software-engineering scope}
+The present prototype emphasizes inspectability over aggressive optimization. Randomized molecular embedding uses an explicit seed; each stage is timed with \texttt{time.perf\_counter}; RSS is sampled with \texttt{psutil}; the backend and dimensions are recorded in summary files; and numerical guardrails are printed directly in the console output. The implementation reuses established community libraries (NumPy, SciPy, pandas, RDKit, psutil, Matplotlib, and optional browser libraries for visualization) rather than reimplementing basic linear algebra or molecular file handling. This modular approach is consistent with the software-ecosystem model emphasized in previous JCP software collections.\cite{Sherrill2020Software,Sherrill2021Software}
+
+The current code is a research prototype rather than a mature general-purpose package. Before journal submission, the public repository should contain an installable environment specification, automated smoke tests, at least one reproducible example input/output pair, a versioned release, and a tested electronic-structure import path. These are not cosmetic additions: JCP software referees may be asked to install and assess the program itself.\cite{Sherrill2021Software}
+
+\section{Theory and Algorithms}
+
+\subsection{Mass-weighted harmonic vibrational problem}
+For Cartesian coordinates $\mathbf{x}\in\mathbb{R}^{3N}$, the Cartesian Hessian is
+\begin{equation}
+(\Hcart)_{i j}=\frac{\partial^2 V}{\partial x_i\partial x_j}.
+\label{eq:hcart}
+\end{equation}
+In the implementation used here, Hessian columns are obtained by a central finite difference of force-field gradients,
+\begin{equation}
+(\Hcart)_{:,j}\approx
+\frac{\mathbf{g}(\mathbf{x}+\epsilon\mathbf{e}_j)-
+      \mathbf{g}(\mathbf{x}-\epsilon\mathbf{e}_j)}{2\epsilon},
+\label{eq:fdhessian}
+\end{equation}
+with $\epsilon=10^{-3}$ \AA.  The mass-weighted Hessian is
+\begin{equation}
+\Hmw=\mathbf{M}^{-1/2}\Hcart\mathbf{M}^{-1/2},
+\label{eq:massweight}
+\end{equation}
+where each atomic mass is repeated for its three Cartesian components. Dense NMA solves
+\begin{equation}
+\Hmw\mathbf{v}_k=\lambda_k\mathbf{v}_k.
+\label{eq:eigenproblem}
+\end{equation}
+The code retains the sign of negative eigenvalues to flag imaginary modes and converts eigenvalues to wavenumbers as
+\begin{equation}
+\widetilde{\nu}_k = \operatorname{sgn}(\lambda_k)
+\frac{1}{2\pi c}
+\sqrt{\left|\lambda_k\right|\frac{4184/N_A}{10^{-20}m_u}},
+\label{eq:freqconversion}
+\end{equation}
+for Hessian units of (kcal mol$^{-1}$)/(\AA$^2$ amu). The six modes with the smallest $|\widetilde{\nu}|$ are treated as external translation/rotation modes rather than blindly deleting the first six sorted eigenvalues.
+
+For the present proof-of-concept intensity model, normalized Gasteiger charges $q_a$ are used to construct a fixed-charge dipole-displacement proxy,\cite{Gasteiger1980}
+\begin{equation}
+I_k \propto
+\left\lVert
+\sum_{a=1}^{N}q_a
+\frac{\mathbf{v}_{ak}}{\sqrt{m_a}}
+\right\rVert^2.
+\label{eq:irproxy}
+\end{equation}
+The stick spectrum is broadened with a Gaussian of width $\sigma=12$ cm$^{-1}$. Equation~(\ref{eq:irproxy}) is an algorithm-development proxy, not a substitute for a physical electronic-structure dipole derivative. This limitation is addressed explicitly in Sec.~\ref{sec:limitations}.
+
+\subsection{Dense, Lanczos, and low-mode Krylov references}
+Dense NMA uses a symmetric eigensolver. Independently, a fully reorthogonalized Lanczos procedure constructs
+\begin{equation}
+\mathcal{K}_m(\Hmw,\mathbf{q}_1)=
+\operatorname{span}\{\mathbf{q}_1,\Hmw\mathbf{q}_1,\ldots,\Hmw^{m-1}\mathbf{q}_1\},
+\end{equation}
+with double reorthogonalization and a tridiagonal Ritz problem. For the full validation, $m$ is allowed to approach $d$. A sparse symmetric eigensolver is also used for a selected set of low-frequency modes. This three-level classical reference is useful because a perfect Pauli reconstruction is not meaningful if the classical reference itself is not converged.
+
+\subsection{Shift, scale, and compact power-of-two embedding}
+The Cartesian dimension $d$ is embedded in
+\begin{equation}
+D=2^{n_q},\qquad n_q=\left\lceil\log_2 d\right\rceil.
+\label{eq:qubits}
+\end{equation}
+No dense eigenspectrum is required to normalize the operator. Instead, a Gershgorin lower bound
+\begin{equation}
+\ell=\min_i\left[H_{ii}-\sum_{j\neq i}|H_{ij}|\right]
+\end{equation}
+is used to define a nonnegative shift
+\begin{equation}
+s=\max(0,-\ell+10^{-10}),
+\end{equation}
+and a scale
+\begin{equation}
+a=\norm{\Hmw+s\mathbf{I}}_{\infty}.
+\end{equation}
+The normalized physical block is
+\begin{equation}
+\mathbf{H}_n=\frac{\Hmw+s\mathbf{I}}{a}.
+\end{equation}
+The remaining padded states are assigned an identity block, giving $\Hp\in\mathbb{R}^{D\times D}$. Physical eigenvalues are recovered from normalized eigenvalues $\tilde\lambda$ using
+\begin{equation}
+\lambda=a\tilde\lambda-s.
+\label{eq:unscale}
+\end{equation}
+
+\subsection{Exact Pauli decomposition}
+Any $D=2^{n_q}$ Hermitian matrix admits
+\begin{equation}
+\Hp=\sum_{j=1}^{P} c_j P_j,
+\qquad P_j\in\{I,X,Y,Z\}^{\otimes n_q},
+\label{eq:paulidecomp}
+\end{equation}
+with
+\begin{equation}
+c_j=\frac{1}{D}\Tr(P_j\Hp).
+\label{eq:paulicoeff}
+\end{equation}
+The implementation uses binary symplectic $x$ and $z$ masks and stores each nonzero term as two 32-bit integer masks and one 64-bit real coefficient. Terms are sorted by decreasing $|c_j|$. For the real symmetric matrices considered here, the observed number of nonzero stored terms follows $P=D(D+1)/2$ for the tested dimensions, yielding 2080, 8256, and 32896 terms for $D=64$, 128, and 256, respectively.
+
+The full reconstruction is validated before any truncation using
+\begin{equation}
+\epsilon_H^{(100)}=
+\frac{\norm{\Hp-\sum_jc_jP_j}_F}{\norm{\Hp}_F}.
+\label{eq:fullpaulierr}
+\end{equation}
+This is the principal encoding sanity check.
+
+\subsection{Pauli sparsification and physical-subspace leakage}
+For a requested retained term fraction $f$, the $K=\lceil fP\rceil$ largest coefficients are retained,
+\begin{equation}
+\Hf=\sum_{j=1}^{K}c_jP_j.
+\label{eq:compressedH}
+\end{equation}
+In addition to term fraction, two cumulative coefficient weights are reported,
+\begin{align}
+W_1(K)&=\frac{\sum_{j\le K}|c_j|}{\sum_j|c_j|},\\
+W_2(K)&=\frac{\sum_{j\le K}|c_j|^2}{\sum_j|c_j|^2}.
+\label{eq:weights}
+\end{align}
+Operator error is
+\begin{equation}
+\epsilon_H(f)=\frac{\norm{\Hp-\Hf}_F}{\norm{\Hp}_F}.
+\label{eq:operror}
+\end{equation}
+Because truncation may couple the physical Cartesian block to padded basis states, eigenstates are ranked by physical-subspace weight
+\begin{equation}
+w_k=\sum_{i=1}^{d}|V_{ik}|^2,
+\end{equation}
+and the $d$ states with largest $w_k$ are projected back into the physical block and renormalized. Mean and minimum physical-state weights, together with cross-block norms, quantify leakage.
+
+\subsection{Exact and Suzuki--Trotter propagation}
+For a fixed compressed Hamiltonian $\Hf$, the exact classical propagator is
+\begin{equation}
+U_{\mathrm{ex}}(t)=\exp(-\ii\Hf t).
+\label{eq:exactprop}
+\end{equation}
+The second-order symmetric Suzuki formula used in the code is\cite{Trotter1959,Suzuki1976}
+\begin{equation}
+U_{\mathrm{ST2}}(t;r)=
+\left[
+\prod_{j=1}^{K}e^{-\ii c_jP_j\Delta t/2}
+\prod_{j=K}^{1}e^{-\ii c_jP_j\Delta t/2}
+\right]^r,
+\quad \Delta t=t/r.
+\label{eq:st2}
+\end{equation}
+Since $P_j^2=I$,
+\begin{equation}
+e^{-\ii\theta P_j}=\cos\theta\,I-\ii\sin\theta\,P_j.
+\label{eq:pauliexp}
+\end{equation}
+An adaptive evolution time is chosen so that exact eigenphases remain inside the principal interval and phase wrapping is avoided. Product-formula error is evaluated only against $U_{\mathrm{ex}}$ for the \emph{same} $\Hf$.
+
+The unitary metrics are
+\begin{equation}
+\epsilon_U=\frac{\norm{U_{\mathrm{ST2}}-U_{\mathrm{ex}}}_F}
+{\norm{U_{\mathrm{ex}}}_F}
+\end{equation}
+and the phase-insensitive trace fidelity
+\begin{equation}
+F_{\mathrm{tr}}=\frac{1}{D}
+\left|\Tr\left(U_{\mathrm{ex}}^{\dagger}U_{\mathrm{ST2}}\right)\right|.
+\label{eq:tracefid}
+\end{equation}
+
+\subsection{Spectral accuracy metrics}
+For $M$ physical vibrational modes, the frequency mean absolute error (MAE) and root mean square error (RMSE) are
+\begin{align}
+\mathrm{MAE}_{\nu}&=\frac{1}{M}\sum_{k=1}^{M}|\nu_k-\nu_k^{\mathrm{ref}}|,\\
+\mathrm{RMSE}_{\nu}&=\sqrt{\frac{1}{M}\sum_{k=1}^{M}(\nu_k-\nu_k^{\mathrm{ref}})^2}.
+\end{align}
+For broadened spectra $S$ and $S_{\mathrm{ref}}$, cosine similarity is
+\begin{equation}
+C_{\mathrm{spec}}=
+\frac{S\cdot S_{\mathrm{ref}}}{\norm{S}\norm{S_{\mathrm{ref}}}},
+\label{eq:cosine}
+\end{equation}
+and the integrated absolute spectral error is
+\begin{equation}
+E_{\mathrm{int}}=
+\frac{\int|S(\nu)-S_{\mathrm{ref}}(\nu)|\,d\nu}
+{\int|S_{\mathrm{ref}}(\nu)|\,d\nu}.
+\label{eq:integrated}
+\end{equation}
+
+\subsection{Computational cost and memory model}
+The central-difference Hessian in Eq.~(\ref{eq:fdhessian}) requires $2d$ gradient evaluations. Its cost is therefore approximately
+\begin{equation}
+T_{\mathrm{Hess}}\sim 2d\,T_{\mathrm{grad}}.
+\end{equation}
+Dense diagonalization has asymptotic cost $\mathcal{O}(d^3)$ and Hessian storage
+\begin{equation}
+M_{\mathrm{dense}}=8d^2\ \mathrm{bytes}
+\label{eq:densemem}
+\end{equation}
+for double precision. A matrix-free $m$-step Lanczos process would require $m$ Hessian-vector products and $\mathcal{O}(dm)$ basis storage; the current small-molecule validation stores the dense Hessian and therefore should not be presented as a matrix-free memory advantage.
+
+The direct Pauli decomposition implemented here evaluates $D^2$ candidate strings with $\mathcal{O}(D)$ coefficient work and is therefore an $\mathcal{O}(D^3)$ classical preprocessing step. With 16 bytes per structured Pauli record,
+\begin{equation}
+M_{\mathrm{Pauli}}\approx 16K\ \mathrm{bytes}.
+\label{eq:paulimem}
+\end{equation}
+A dense classical complex unitary requires
+\begin{equation}
+M_U=16D^2\ \mathrm{bytes}.
+\label{eq:unitarymem}
+\end{equation}
+Finally, the classical emulator applies each Pauli exponential to a dense $D\times D$ unitary at $\mathcal{O}(D^2)$ cost. The approximate work of the second-order implementation is consequently
+\begin{equation}
+W_{\mathrm{ST2}}\propto 2rKD^2.
+\label{eq:stwork}
+\end{equation}
+Equation~(\ref{eq:stwork}) is a \emph{classical emulation cost}, not a quantum gate-count estimate. Quantum hardware cost would additionally depend on Pauli weight, synthesis, connectivity, fault-tolerance assumptions, state preparation, and measurement.\cite{Trenev2025,Malpathak2026}
+
+\section{Computational Details}
+Ten toxin-related molecules were used as chemically varied algorithmic benchmarks: Anatoxin-a, Aflatoxin B1, Saxitoxin, Tetrodotoxin, Ricinine, Patulin, Ochratoxin A, Zearalenone, T-2 toxin, and Citrinin. The selection is used only for computational spectroscopy and representation testing. No synthesis, preparation, acquisition, or handling protocol is part of this work.
+
+Hydrogens were added explicitly. Initial 3D coordinates were generated with RDKit ETKDG and optimized with MMFF94s; UFF is available as a fallback in the code, although all ten preflight structures reported MMFF94s parameter coverage.\cite{Halgren1996} The final benchmark code used Python 3.11, NumPy, SciPy, pandas, psutil, and RDKit. Before submission, the manuscript and repository should report the exact package versions from the final reproducible environment rather than a mixture of development runs. Runtime was measured with \texttt{time.perf\_counter}; resident-set-size (RSS) memory was sampled immediately before and after each stage with psutil. Because RSS deltas do not equal true peak allocation for short-lived temporaries, both analytic representation sizes and measured process RSS are reported.
+
+\begin{table*}[t]
+\caption{Ten-molecule benchmark and compact register size. ``Reduction'' compares the compact index register $n_q=\lceil\log_2 d\rceil$ with a hypothetical one-qubit-per-Cartesian-DOF representation; it is \emph{not} a classical RAM reduction.}
+\label{tab:benchmark}
+\centering
+\scriptsize
+\begin{tabular}{lrrrrrrr}
+\toprule
+Molecule & Atoms & $d=3N$ & $3N-6$ & $n_q$ & $D$ & Full Pauli terms & Register reduction (\%)\\
+\midrule
+Anatoxin-a     & 27 & 81  & 75  & 7 & 128 & 8256  & 91.36\\
+Aflatoxin B1   & 35 & 105 & 99  & 7 & 128 & 8256  & 93.33\\
+Saxitoxin      & 38 & 114 & 108 & 7 & 128 & 8256  & 93.86\\
+Tetrodotoxin   & 39 & 117 & 111 & 7 & 128 & 8256  & 94.02\\
+Ricinine       & 20 & 60  & 54  & 6 & 64  & 2080  & 90.00\\
+Patulin        & 17 & 51  & 45  & 6 & 64  & 2080  & 88.24\\
+Ochratoxin A   & 46 & 138 & 132 & 8 & 256 & 32896 & 94.20\\
+Zearalenone    & 45 & 135 & 129 & 8 & 256 & 32896 & 94.07\\
+T-2 toxin      & 67 & 201 & 195 & 8 & 256 & 32896 & 96.02\\
+Citrinin       & 32 & 96  & 90  & 7 & 128 & 8256  & 92.71\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Software Validation and Illustrative Applications}
+The following calculations are intended as software-validation cases. They test whether the implementation preserves the input operator and separates the numerical errors it is designed to diagnose. Because the current benchmark backend is MMFF94s with a fixed-charge intensity proxy, the examples should not be read as final electronic-structure predictions.
+
+\subsection{Full-Hamiltonian validation}
+The most important numerical control is the 100\% Pauli reconstruction. Four independently available validation runs are summarized in Table~\ref{tab:paulival}. Relative Frobenius errors are in the $10^{-16}$ range and the broadened spectral cosine is unity to the reported precision. These results show that the power-of-two embedding and Pauli coefficient construction are numerically lossless before sparsification.
+
+\begin{table}[b]
+\caption{Independent full-Pauli reconstruction checks from the current validation outputs.}
+\label{tab:paulival}
+\centering
+\scriptsize
+\begin{tabular}{lrrr}
+\toprule
+Molecule & $d$ & $P$ & $\epsilon_H^{(100)}$\\
+\midrule
+Aspirin  & 63  & 2080  & $4.36\times10^{-16}$\\
+Caffeine & 72  & 8256  & $5.11\times10^{-16}$\\
+Curcumin & 141 & 32896 & $8.26\times10^{-16}$\\
+Patulin  & 51  & 2080  & $3.12\times10^{-16}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Representative Zearalenone results are shown in Fig.~\ref{fig:zearalenone}. The Dense NMA reference, full Lanczos result, and 100\% Pauli reconstruction overlap in the full-Hamiltonian panel. The compressed and Trotter curves separate strongly from Dense NMA under 1\% retention, while remaining close to each other. This visual pattern is the expected signature of dominant compression error rather than dominant Trotter error.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/zearalenone_spectra.pdf}
+\caption{Zearalenone validation spectrum. Top: Dense NMA, full Lanczos, and 100\% Pauli reconstruction overlap. Middle: an extreme 1\% Pauli retention stress test strongly distorts the spectrum, while exact compressed and Suzuki--Trotter curves track one another. Bottom: residuals relative to Dense NMA expose the stage at which the spectral error enters.}
+\label{fig:zearalenone}
+\end{figure}
+
+\subsection{Pauli compression defines the accuracy--resource frontier}
+Patulin provides a complete numerical example of the compression metrics currently available from the final code. Table~\ref{tab:patulincompression} shows that the full representation is exact, whereas aggressive sparsification produces large frequency and spectral errors. Particularly noteworthy is the mismatch between coefficient-norm retention and spectroscopic fidelity. At 10\% term retention, $W_2=0.9951$, yet the operator relative Frobenius error is 0.0698, frequency MAE is 159.2 cm$^{-1}$, and spectral cosine is only 0.514. Thus, retaining 99.5\% of the squared coefficient norm does not guarantee preservation of the eigenvectors and intensities controlling the broadened spectrum.
+
+\begin{table}[t]
+\caption{Patulin Pauli-compression stress test.}
+\label{tab:patulincompression}
+\centering
+\scriptsize
+\begin{tabular}{rrrrr}
+\toprule
+Terms (\%) & $W_2$ & $\epsilon_H$ & MAE$_\nu$ (cm$^{-1}$) & $C_{\rm spec}$\\
+\midrule
+100.00 & 1.0000 & $3.12\times10^{-16}$ & $1.98\times10^{-12}$ & 1.000\\
+10.00  & 0.9951 & 0.0698 & 159.18 & 0.514\\
+1.01   & 0.9631 & 0.1920 & 350.52 & 0.114\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/patulin_compression.pdf}
+\caption{Patulin compression diagnostics. The 10\% and 1\% calculations demonstrate that coefficient-norm retention alone is not a sufficient proxy for vibrational spectral fidelity. The final study should densify the retention grid (e.g., 100, 90, 75, 50, 40, 30, 25, 20, 15, 10, 5, 1\%) to locate a molecule-specific fidelity threshold.}
+\label{fig:patulincompression}
+\end{figure}
+
+These data motivate defining a minimum accepted fraction
+\begin{equation}
+f_{\min}=\min_f\left\{f:\ C_{\mathrm{spec}}(f)\ge C_0,
+\ \mathrm{MAE}_{\nu}(f)\le\delta_{\nu},
+\ \epsilon_H(f)\le\delta_H\right\}.
+\label{eq:fmin}
+\end{equation}
+Rather than assuming a universal 1\% or 10\% representation, Eq.~(\ref{eq:fmin}) creates a molecule-specific accuracy--resource frontier. A threshold such as $C_0=0.95$ can be used as a prespecified screening criterion, with the frequency and operator tolerances chosen according to the intended spectroscopy application.
+
+\subsection{Same-Hamiltonian Suzuki--Trotter validation}
+The product-formula test is deliberately separated from Eq.~(\ref{eq:fmin}). For the Patulin 1.01\% stress test (21 of 2080 terms), the exact compressed Hamiltonian and the second-order Suzuki--Trotter approximation give same-Hamiltonian spectral cosine similarity equal to 1.0 to the reported precision for $r=1$ and 2. The unitary relative Frobenius error is $3.85\times10^{-16}$ and $7.14\times10^{-16}$, respectively, with trace fidelities indistinguishable from unity at printed precision. These values should not be generalized to denser noncommuting Pauli sets; they show only that this particular aggressively compressed Patulin operator is not Trotter-error limited.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/patulin_trotter.pdf}
+\caption{Same-Hamiltonian Suzuki--Trotter validation for the Patulin 1.01\% stress test. The plotted errors are relative to the exact exponential of the same 21-term compressed Pauli Hamiltonian and therefore do not include compression error.}
+\label{fig:patulintrotter}
+\end{figure}
+
+The same qualitative separation is visible for Citrinin and T-2 toxin (Fig.~\ref{fig:moreexamples}): 100\% Pauli, Dense NMA, and Lanczos overlap in the full-Hamiltonian validation, whereas 1\% compression significantly changes the spectrum and exact-compressed and Trotter spectra remain closely paired. These cases should be supplemented by their numerical CSV metrics in the final submission.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.47\textwidth]{figures/citrinin_spectra.pdf}\hfill
+\includegraphics[width=0.47\textwidth]{figures/t2_toxin_spectra.pdf}
+\caption{Representative validation plots for Citrinin (left) and T-2 toxin (right). Each source figure contains (a) full-Hamiltonian validation, (b) the 1\% compression/Trotter stress test, and (c) residuals relative to Dense NMA. These examples reinforce that extreme compression, not the exact Pauli mapping, is the dominant source of the observed spectral distortion.}
+\label{fig:moreexamples}
+\end{figure*}
+
+\subsection{Runtime and memory: what is actually reduced?}
+Figure~\ref{fig:resources} distinguishes compact register size from classical representation memory. Across the ten-molecule set, $d$ increases from 51 to 201 while $n_q$ remains between 6 and 8. Relative to a one-qubit-per-DOF bookkeeping baseline, the index-register reduction is 88.2--96.0\%. This is a genuine representation statement. It does \emph{not}, however, imply lower classical RAM in the present emulator.
+
+For example, the T-2 toxin dense $201\times201$ double-precision Hessian requires approximately 0.308 MiB, whereas a full 32896-record Pauli list requires approximately 0.502 MiB under the 16-byte record layout, and a dense complex $256\times256$ unitary requires 1.0 MiB. Thus the full Pauli transformation can increase classical storage at these dimensions. Classical storage becomes competitive only after enough Pauli terms are removed, and that reduction must be constrained by Eq.~(\ref{eq:fmin}). This result is important because it prevents compact qubit count from being misreported as a classical memory saving.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/resource_scaling.pdf}
+\caption{Representation scaling for the ten-molecule benchmark. (a) Cartesian degrees of freedom and compact index-register qubits. (b) Analytic classical memory for the dense double-precision Hessian, the full structured Pauli list, and a dense complex unitary. The compact register is logarithmic in dimension, but the current classical Pauli and unitary representations do not inherit that memory reduction automatically.}
+\label{fig:resources}
+\end{figure*}
+
+Stage-resolved timing for the Patulin smoke test is shown in Fig.~\ref{fig:timing}. On the test environment, 3D preparation required 0.0208 s, the 51-column finite-difference Hessian 0.0186 s, Dense NMA 0.00058 s, full Lanczos 0.00119 s, full Pauli decomposition 0.0399 s, and full Pauli reconstruction 0.0334 s. The 10\% and 1\% reconstructions required 0.00348 and 0.00050 s, respectively. For the 21-term 1\% Hamiltonian, second-order Trotter emulation required 0.00135 s at $r=1$ and 0.00255 s at $r=2$. These timings demonstrate two points. First, for small molecules, classical Dense NMA is already extremely fast, so speedup claims are neither required nor supported. Second, the current direct Pauli decomposition is itself a nontrivial classical preprocessing cost. The scientifically useful quantity is therefore the accuracy--resource tradeoff, not an asserted wall-time advantage.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/patulin_stage_time.pdf}
+\caption{Measured stage-resolved wall time for the Patulin smoke test. The horizontal axis is logarithmic. The result illustrates why classical Pauli preprocessing and dense-unitary emulation must be included in an end-to-end cost discussion rather than reporting only the propagation kernel.}
+\label{fig:timing}
+\end{figure}
+
+Measured process RSS for the same Patulin run increased from approximately 200 MiB before molecule preparation to approximately 238 MiB by the end of the Trotter tests. This process-level memory is dominated by the Python/RDKit/SciPy runtime and transient arrays and therefore should not be confused with the analytic storage requirements in Eqs.~(\ref{eq:densemem})--(\ref{eq:unitarymem}). For reproducibility, the software records stage-wise time, RSS before and after the operation, and RSS delta in a machine-readable CSV.
+
+\subsection{Interactive normal-mode interpretation}
+Each molecule can optionally generate a browser-based 3D viewer using 3Dmol.js\cite{Rego2015} with molecular rotation, zoom, representation controls, normal-mode animation, and clickable Dense-NMA IR-mode markers. The viewer is a visualization layer rather than part of the numerical validation. Its purpose is to connect a selected spectral feature to the corresponding Cartesian displacement pattern and to facilitate qualitative inspection of mode mixing under compression. A future quantitative extension should report mode-shape overlap, for example the modal assurance criterion
+\begin{equation}
+\mathrm{MAC}_{ij}=\frac{|\mathbf{v}_i^{\mathsf T}\mathbf{v}_j|^2}
+{(\mathbf{v}_i^{\mathsf T}\mathbf{v}_i)(\mathbf{v}_j^{\mathsf T}\mathbf{v}_j)}.
+\end{equation}
+
+\section{Software Engineering, Limitations, and Discussion}
+\subsection{What the software adds beyond a feature list}
+The contribution of the program is not the individual use of Dense diagonalization, Lanczos iteration, Pauli decomposition, or a Suzuki product formula; each is established. The useful software contribution is the way these components are connected with explicit validation boundaries and resource accounting. The implementation was designed so that an operator-transformation error, a compression error, and a propagation error cannot silently collapse into one reported ``quantum'' discrepancy. This design choice directly addresses the type of implementation detail that software papers often omit but that determines whether another group can reproduce or extend the calculation.
+
+\subsection{Algorithmic behavior revealed by the implementation}
+The principal result of this work is methodological rather than a claim of quantum speedup. The exact Pauli mapping is validated to machine precision, the classical eigensolution is independently checked, and the effect of Hamiltonian sparsification is separated from the effect of the product formula. This error decomposition is particularly important because an apparently poor ``Trotter spectrum'' can in fact be an accurate propagation of an already over-compressed Hamiltonian.
+
+The Patulin case provides a concrete warning against coefficient-only sparsification criteria. Although the 10\% representation retains approximately 99.5\% of the squared coefficient norm, the spectral cosine drops to 0.514 and the frequency MAE exceeds 150 cm$^{-1}$. Nearby or coupled normal modes can be sensitive to matrix perturbations that appear small under a global coefficient norm; eigenvector rotation can then redistribute the dipole-displacement intensity. Consequently, a physically motivated compression strategy must constrain spectral observables directly, not merely $W_1$ or $W_2$.
+
+The compact index register is likewise easy to misinterpret. Encoding a $d$-dimensional real symmetric operator in $n_q=\lceil\log_2d\rceil$ qubits is a meaningful state-space compression relative to direct one-hot coordinate encodings, and related compact encodings have been explored for vibrational quantum algorithms.\cite{Sawaya2020dlevel,Sawaya2021} However, the number of nonzero Pauli terms and the gate-level implementation remain essential. In the present full decomposition, $P$ grows quadratically with the padded dimension, and the dense classical unitary used for validation grows as $D^2$. Thus, the present work should be described as a \emph{compact quantum-compatible encoding with explicit resource accounting}, not as a demonstrated memory or runtime advantage.
+
+\subsection{Interoperability with electronic-structure workflows}
+The numerical core is naturally positioned as a post-processing layer between an electronic-structure calculation and compact-operator analysis. In a production workflow, an upstream electronic-structure package should provide an optimized geometry, atomic masses, a Cartesian or mass-weighted Hessian, and either dipole derivatives or mode intensities. The current prototype does not yet claim native support for a particular quantum-chemistry file format. Adding and testing such interfaces is the most important step for the \emph{Electronic Structure Software 2.0} submission because it converts the present self-contained benchmark into a reusable analysis component of an electronic-structure software ecosystem.
+
+A practical first release should support at least one openly testable route, for example a documented generic NumPy/text matrix interface plus one direct parser or Python API for a widely used electronic-structure package. The benchmark should then be repeated for several molecules using a converged DFT Hessian and physical dipole derivatives. That comparison will test both numerical interoperability and the transfer of the compact Pauli analysis from the current force-field development backend to an electronic-structure source.
+
+\subsection{Limitations and required spectroscopy upgrade}
+\label{sec:limitations}
+The most important chemical-physics limitation is the spectroscopy backend. MMFF94s geometries and finite-difference Hessians are useful for fast algorithmic development,\cite{Halgren1996} but the Gasteiger fixed-charge intensity of Eq.~(\ref{eq:irproxy}) is not a physical ab initio IR intensity. Before a final spectroscopy-centered JCP submission, a representative subset should be recalculated with a quantum-chemical Hessian and dipole derivatives (e.g., a converged DFT protocol), and the resulting frequencies/intensities should be compared with the compact Pauli pipeline. The exact Pauli and Trotter machinery can remain unchanged because it consumes the final real symmetric vibrational operator and mode-intensity information rather than depending on MMFF-specific physics.
+
+A second limitation is that the present benchmark is harmonic. Anharmonic vibrational structure is precisely where quantum algorithms may become more compelling, and prior work has considered modal, bosonic, and explicitly anharmonic formulations.\cite{Ollitrault2020,Sawaya2021,Trenev2025,Malpathak2026} Extending the current accuracy--resource methodology to anharmonic Hamiltonians would therefore be a natural next step.
+
+A third limitation is the direct classical Pauli decomposition and dense-unitary emulation. These were chosen for transparent verification, not scalability. For larger operators, matrix-free coefficient generation, symmetry filtering, commuting-group structure, sparse propagation, or gate-level cost estimates will be necessary. Product-formula resource claims should ultimately be reported with Pauli weights and commutator-aware error bounds.\cite{Childs2021,Trenev2025,Malpathak2026}
+
+\section{Conclusions}
+We developed a reproducible software workflow for compact Pauli analysis of molecular vibrational Hamiltonians and, more importantly, for locating the numerical stage at which an approximation changes the spectrum. The program combines molecular preparation, harmonic Hessian construction, Dense/Lanczos validation, shift-and-scale embedding, exact Pauli decomposition, fraction-based sparsification, same-Hamiltonian Suzuki--Trotter tests, runtime/RSS telemetry, structured data export, and optional mode visualization.
+
+The software-validation results show that the exact compact mapping can reproduce the encoded operator to machine precision, whereas aggressive term-count sparsification can strongly distort vibrational spectra even when most of the squared Pauli-coefficient weight is retained. In the available stress tests, the Suzuki--Trotter stage tracks the exact dynamics of the same compressed operator more closely than that compressed operator tracks the original Dense-NMA spectrum. The implementation therefore identifies Hamiltonian compression, not the product formula, as the dominant source of error in those cases.
+
+For the \emph{Electronic Structure Software 2.0} Special Topic, the main remaining step is not another cosmetic rewrite but a software and physics upgrade: connect the numerical core to at least one tested electronic-structure Hessian/dipole source, package the code in a public versioned repository with installation and regression tests, and repeat representative benchmarks with a converged quantum-chemical spectroscopy backend. With that addition, the workflow can serve as a focused analysis component for studying accuracy--resource tradeoffs in quantum-compatible vibrational representations while preserving clear provenance from electronic-structure input to final spectrum.
+
+\section*{Supplementary Material}
+The Supplementary Material contains detailed stage-resolved timing and RSS output, Patulin compression and Trotter CSV tables, additional representative spectra, and a separate protein scaling stress test with explicit convergence guardrails.
+
+\section*{Data Availability}
+The current development archive contains the ten-molecule manifest and the machine-readable tables used for the software-validation examples. Before submission, these files should be deposited with the versioned software release or in a persistent repository and the DOI/URL inserted here.
+
+\section*{Code Availability}
+\textit{[ESS2.0 submission requirement to complete.]} The final manuscript should link to a public, version-controlled repository containing the exact release used in the paper, an environment specification, installation instructions, automated smoke/regression tests, and example inputs and outputs that reproduce selected figures. JCP's Chemical Physics Software guidance explicitly expects a public repository or software-download link for software papers.\cite{Sherrill2021Software}
+
+\section*{AI Assistance Disclosure}
+OpenAI ChatGPT was used during development to assist with software prototyping/debugging and during manuscript preparation for language editing and structural revision. The authors independently reviewed, executed, and validated the algorithms, code, numerical outputs, references, figures, and scientific interpretations and take full responsibility for the submitted work. \textit{[Edit this statement so it exactly matches the final use of AI before submission.]}
+
+\section*{Author Declarations}
+\subsection*{Conflict of Interest}
+The authors have no conflicts to disclose. \textit{[Confirm before submission.]}
+
+\subsection*{Author Contributions}
+\textit{[Insert CRediT author contributions before submission.]}
+
+\subsection*{Funding}
+\textit{[Insert funding information before submission.]}
+
+\bibliography{references}
+
+\end{document}
